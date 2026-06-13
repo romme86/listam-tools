@@ -1,0 +1,26 @@
+#!/usr/bin/env zsh
+set -euo pipefail
+
+token="$(security find-generic-password -a romme86 -s npm-listam-token -w 2>/dev/null || true)"
+
+if [[ -z "$token" ]]; then
+  echo "No npm token found in Keychain for service npm-listam-token." >&2
+  exit 1
+fi
+
+tmp_npmrc="$(mktemp "${TMPDIR:-/tmp}/listam-npmrc.XXXXXX")"
+chmod 600 "$tmp_npmrc"
+
+cleanup() {
+  rm -f "$tmp_npmrc"
+}
+
+trap cleanup EXIT INT TERM
+
+{
+  printf '%s\n' 'registry=https://registry.npmjs.org/'
+  printf '%s\n' '@listam:registry=https://registry.npmjs.org/'
+  printf '%s\n' "//registry.npmjs.org/:_authToken=${token}"
+} > "$tmp_npmrc"
+
+NPM_CONFIG_USERCONFIG="$tmp_npmrc" npm "$@"

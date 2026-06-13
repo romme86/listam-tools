@@ -1,0 +1,11 @@
+# Local device config — real SSH hosts, key paths, board serial.
+# Copy cross-device/devices.example.json → cross-device/devices.local.json.
+devices.local.json
+
+# Node dependencies
+node_modules/
+
+# macOS / editor / backups / logs
+.DS_Store
+*.bak
+*.log

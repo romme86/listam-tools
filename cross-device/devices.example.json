@@ -1,0 +1,19 @@
+{
+  "_comment": "Copy to devices.local.json (gitignored) and fill in your real hosts. Every field is also overridable by LISTAM_XDEV_<NAME>_{TARGET,KEY,NODE,ENTRY} env vars. Remote targets must be reachable over SSH with the given key, have Node 22 at `node`, and the listam-headless checkout at `entry`.",
+  "geekom": {
+    "target": "user@your-geekom-host.example",
+    "key": "~/.ssh/id_ed25519",
+    "node": "$HOME/node22/bin/node",
+    "entry": "$HOME/listam/listam-headless/headless.mjs"
+  },
+  "pi": {
+    "target": "user@your-pi-host.example",
+    "key": "~/.ssh/id_ed25519",
+    "node": "$HOME/node22/bin/node",
+    "entry": "$HOME/listam/listam-headless/headless.mjs"
+  },
+  "esp32": {
+    "serial": "/dev/cu.usbmodemXXXX",
+    "hubStorage": "~/listam-leaf-hub"
+  }
+}

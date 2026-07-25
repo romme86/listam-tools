@@ -108,8 +108,16 @@ function runGate(repo, dir) {
 }
 
 function summarize(output) {
-    const node = output.match(/ℹ tests (\d+)[\s\S]*?ℹ pass (\d+)[\s\S]*?ℹ fail (\d+)/)
-    if (node) return `${node[2]}/${node[1]} pass, ${node[3]} fail`
+    // Sum EVERY summary block, not just the first: a repo's `ci` may chain
+    // several `node --test` runs (mobile does test:security + test:store), and
+    // matching once under-reports the total (100 instead of 150).
+    const node = [...output.matchAll(/ℹ tests (\d+)\n(?:.*\n)*?ℹ pass (\d+)\nℹ fail (\d+)/g)]
+    if (node.length) {
+        const total = node.reduce((n, m) => n + Number(m[1]), 0)
+        const pass = node.reduce((n, m) => n + Number(m[2]), 0)
+        const fail = node.reduce((n, m) => n + Number(m[3]), 0)
+        return `${pass}/${total} pass, ${fail} fail`
+    }
     const cargo = [...output.matchAll(/test result: \w+\. (\d+) passed; (\d+) failed/g)]
     if (cargo.length) {
         const pass = cargo.reduce((n, m) => n + Number(m[1]), 0)

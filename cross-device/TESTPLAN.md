@@ -1,5 +1,23 @@
 # Cross-Device Acceptance Matrix — Test Plan
 
+> **This matrix IS the network sync gate.** As of 2026-07-28 the multi-backend
+> join tests in `listam-desktop/test/sync.test.mjs` are skipped on CI: they pair
+> two backends as child processes on ONE machine, which cannot exercise real
+> discovery, holepunching or NAT, so a pass never proved the network worked. (They
+> were also failing ~75% of CI runs for reasons outside the codebase — both sides
+> demonstrably reached `replicate()` on the right base while the connection carried
+> zero blocks and died at the ~13s idle timeout. Runner networking, not app code.)
+> They still run locally. Real coverage lives here — run this before a release or
+> a deploy.
+>
+> Reference numbers, two real machines over mainnet, 2026-07-28: join 3842 ms,
+> initial sync 5 ms, guest→host 262 ms, host→guest 5181 ms, done-flag 270 ms,
+> delete 272 ms. A join in seconds, not the 120 s timeouts CI was reporting.
+>
+> Device targets, users and keys live only in `devices.local.json`, which is
+> gitignored — keep them out of the repo. Start from `devices.example.json`. The
+> JSON report defaults to `/tmp`, also outside the repo.
+
 The Phase 15 cross-instance matrix, executed across real machines instead of
 child processes on one host. Every instance is a real listam backend on its
 own storage root; remote instances are spawned over SSH and driven through

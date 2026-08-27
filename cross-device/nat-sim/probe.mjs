@@ -21,7 +21,10 @@ import process from 'node:process'
 import { Buffer } from 'node:buffer'
 
 const ROLE = process.env.SIM_ROLE ?? 'client'
-const SEED = Buffer.from(process.env.SIM_SEED ?? ''.padEnd(64, '0'), 'hex')
+// `||`, not `??`: compose passes `SIM_SEED: "${SIM_SEED:-}"`, so an unset seed
+// arrives as an empty STRING and a nullish fallback would never fire — leaving
+// DHT.keyPair() to throw on a zero-byte seed instead of using the placeholder.
+const SEED = Buffer.from((process.env.SIM_SEED || '').padEnd(64, '0'), 'hex')
 const RELAY_HEX = (process.env.SIM_RELAY_PUBLIC_KEY ?? '').trim()
 const CONNECT_TIMEOUT_MS = Number(process.env.SIM_CONNECT_TIMEOUT_MS ?? 90_000)
 const NAT_SAMPLE_ROUNDS = Number(process.env.SIM_NAT_SAMPLE_ROUNDS ?? 3)

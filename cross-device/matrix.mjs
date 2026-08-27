@@ -49,7 +49,7 @@ import {
     REPO_ROOT,
 } from './driver.mjs'
 import { openSerialWatcher, readFirmwareCfg } from './esp32-leaf.mjs'
-import { LOSER_SETTLE_MS, isDeadlineReason, isUninformativeReason, readJoinFailure } from './pairing-contention.mjs'
+import { EXPECTED_LOSER_REASON, LOSER_SETTLE_MS, isDeadlineReason, isKnownReason, isUninformativeReason, readJoinFailure } from './pairing-contention.mjs'
 import { runNatSim, judgeNatSim } from './nat-sim/run.mjs'
 
 process.on('uncaughtException', (error) => {
@@ -497,6 +497,16 @@ async function inviteContentionRow(devices) {
                 problems.push(`${outcome.joiner.label} ended on '${failure.reason}' — that is a clock running out, not the host answering`)
             } else if (isUninformativeReason(failure.reason)) {
                 problems.push(`${outcome.joiner.label} failed with '${failure.reason}' — a loser on a single-use invite has a specific reason waiting for it: ${failure.message}`)
+            } else if (!isKnownReason(failure.reason)) {
+                // The reason has to be a word the UI can translate. Anything
+                // outside JOIN_REASON is either a renamed slug the apps no
+                // longer map, or the host's internal policy word leaking out.
+                problems.push(`${outcome.joiner.label} failed with '${failure.reason}', which is not a JOIN_REASON slug — the apps cannot translate it: ${failure.message}`)
+            } else if (failure.reason !== EXPECTED_LOSER_REASON) {
+                // Losing a race for a single-use invite has exactly one correct
+                // answer. A different named reason still reaches the user, but
+                // as the wrong sentence.
+                problems.push(`${outcome.joiner.label} was told '${failure.reason}', not '${EXPECTED_LOSER_REASON}' — it lost a race for a spent single-use invite: ${failure.message}`)
             }
         }
         if (winners.length !== 1) {

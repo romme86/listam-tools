@@ -1,0 +1,5 @@
+# The image installs its own Linux node_modules (see Dockerfile), and the later
+# `COPY . /sim` would overwrite them with whatever is on the host — a macOS
+# udx-native prebuild that cannot load in the container. Keep the host tree out
+# of the build context so that cannot happen by accident.
+node_modules

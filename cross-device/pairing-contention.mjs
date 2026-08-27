@@ -11,9 +11,10 @@
 // So "a loser loses" is not the assertion worth making — a hang satisfies it.
 // The assertion is that a loser learns it lost FAST and for a NAMED reason.
 //
-// The vocabulary is imported, not copied: `JOIN_REASON` is what the backend
-// actually puts on the wire, so a renamed slug breaks this row instead of
-// quietly passing it.
+// The vocabulary is imported and checked for MEMBERSHIP, not just borrowed:
+// `JOIN_REASON` is what the backend actually puts on the wire, and a loser whose
+// reason is outside that set — a renamed slug, or a host-side policy word like
+// 'exhausted' leaking through — breaks this row instead of quietly passing it.
 import { JOIN_REASON } from '../../listam-packages/packages/backend/lib/pairing-tuning.mjs'
 
 // A refusal is a message the host already decided to send; it crosses one
@@ -49,12 +50,30 @@ const DEADLINE_REASONS = new Set([JOIN_REASON.TIMEOUT, JOIN_REASON.NO_NETWORK])
 // invite has a specific reason waiting for it; 'unknown' means nobody named it.
 const UNINFORMATIVE_REASONS = new Set([JOIN_REASON.UNKNOWN, 'unclassified'])
 
+// The whole published vocabulary. Importing JOIN_REASON is not by itself enough
+// to make a renamed slug break this row — the deadline/uninformative sets only
+// name a handful of members, so any string outside them used to read as a
+// perfectly good answer. Checking membership is what actually ties the row to
+// the backend's wire contract.
+const KNOWN_REASONS = new Set(Object.values(JOIN_REASON))
+
+// What losing a race for a single-use invite means, precisely: the host's
+// invite-policy calls it 'exhausted' and denyStatusForReason maps that to
+// DENY_STATUS.USED, which a guest decodes as INVITE_USED. Any other named
+// reason means the host answered a different question than the one asked, and
+// the user-visible copy will be wrong even though nothing timed out.
+export const EXPECTED_LOSER_REASON = JOIN_REASON.INVITE_USED
+
 export function isDeadlineReason(reason) {
     return DEADLINE_REASONS.has(reason)
 }
 
 export function isUninformativeReason(reason) {
     return UNINFORMATIVE_REASONS.has(reason)
+}
+
+export function isKnownReason(reason) {
+    return KNOWN_REASONS.has(reason)
 }
 
 export function classifyJoinFailure(text) {

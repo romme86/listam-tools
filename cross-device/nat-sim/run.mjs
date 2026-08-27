@@ -34,6 +34,14 @@ function run(command, args, { timeoutMs = COMPOSE_TIMEOUT_MS, env = {} } = {}) {
         proc.stdout.on('data', (chunk) => { stdout += chunk })
         proc.stderr.on('data', (chunk) => { stderr += chunk })
         const killer = setTimeout(() => proc.kill('SIGKILL'), timeoutMs)
+        // No docker BINARY at all (a CI box, the Pi) emits 'error' and never
+        // 'exit'. Unhandled, that is a thrown ENOENT that takes the whole matrix
+        // run down — the exact opposite of the SKIP contract this module owes
+        // its callers, so turn it into an ordinary nonzero result.
+        proc.on('error', (error) => {
+            clearTimeout(killer)
+            resolve({ code: -1, stdout, stderr: `${stderr}${error?.message ?? error}` })
+        })
         once(proc, 'exit').then(([code]) => {
             clearTimeout(killer)
             resolve({ code, stdout, stderr })
@@ -95,7 +103,8 @@ export async function runNatSim({ relay = false, connectTimeoutMs = 90_000, prog
         return {
             skipped: true,
             reason: 'no reachable docker daemon — the NAT sim needs Linux network namespaces '
-                + '(iptables MASQUERADE --random-fully), which on macOS means Docker Desktop\'s Linux VM must be running',
+                + '(iptables MASQUERADE --random-fully), which on macOS means Docker Desktop\'s Linux VM must be running'
+                + ` (docker info: ${daemon.stderr.trim().split('\n').at(-1)?.slice(0, 200) ?? 'no output'})`,
         }
     }
     if (relay && !existsSync(HEADLESS_RELAY)) {
@@ -108,7 +117,6 @@ export async function runNatSim({ relay = false, connectTimeoutMs = 90_000, prog
 
     const env = {
         SIM_SEED: randomBytes(32).toString('hex'),
-        SIM_RELAY_SEED: randomBytes(32).toString('hex'),
         SIM_CONNECT_TIMEOUT_MS: String(connectTimeoutMs),
         SIM_BOOTSTRAP: '',
         SIM_RELAY_PUBLIC_KEY: '',

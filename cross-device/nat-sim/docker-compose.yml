@@ -58,7 +58,6 @@ services:
     command: ["node", "/sim/relay-entry.mjs"]
     environment:
       SIM_BOOTSTRAP: "${SIM_BOOTSTRAP:-}"
-      SIM_RELAY_SEED: "${SIM_RELAY_SEED:-}"
     # The relay's own source, plus the pure-JS @listam packages it imports.
     # Those two have no native deps, so the host's copy loads here unchanged —
     # everything with a prebuild is installed in the image instead.

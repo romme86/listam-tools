@@ -32,9 +32,9 @@ TARGET="${1:-}"
 shift
 
 SSH_KEY=""
-REMOTE_STORAGE="\$HOME/listam-relay"
+REMOTE_STORAGE=""
 DO_INSTALL=0
-REMOTE_ROOT="\$HOME/listam"
+REMOTE_ROOT=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -46,14 +46,23 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# The generated systemd unit points at on-disk paths, so a storage path with
-# spaces, quotes, $ or backticks produces a unit that silently fails to start.
-case "$REMOTE_STORAGE" in
-    *[\ \'\"\$\`]*) echo "refusing: --storage must be shell-safe (no spaces, quotes, \$ or backticks)" >&2; exit 2 ;;
-esac
-
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15)
 [ -n "$SSH_KEY" ] && SSH+=(-i "$SSH_KEY")
+
+# Resolve the remote home ONCE and build absolute paths from it. The generated
+# systemd unit bakes these paths in, and a unit cannot expand $HOME — so a
+# literal "$HOME/..." here would produce a unit that silently fails to start.
+REMOTE_HOME="$("${SSH[@]}" "$TARGET" 'printf %s "$HOME"')"
+[ -n "$REMOTE_HOME" ] || { echo "could not resolve the remote home directory" >&2; exit 1; }
+: "${REMOTE_STORAGE:=$REMOTE_HOME/listam-relay}"
+: "${REMOTE_ROOT:=$REMOTE_HOME/listam}"
+
+# Same reason: a path with spaces, quotes, $ or backticks produces a broken unit.
+for p in "$REMOTE_STORAGE" "$REMOTE_ROOT"; do
+    case "$p" in
+        *[\ \'\"\$\`]*) echo "refusing: remote paths must be shell-safe (no spaces, quotes, \$ or backticks): $p" >&2; exit 2 ;;
+    esac
+done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [ -d "$HERE/listam-headless" ] || { echo "cannot find listam-headless next to listam-tools" >&2; exit 1; }
@@ -74,13 +83,13 @@ echo "==> minting / reading the relay public key"
 # returns the SAME key. The address is baked into client builds and handed to
 # people the owner will never speak to again, so it must never rotate silently.
 KEY_JSON="$("${SSH[@]}" "$TARGET" \
-    "cd $REMOTE_ROOT/listam-headless && \$HOME/node22/bin/node headless.mjs relay --storage $REMOTE_STORAGE --print-key")"
+    "cd $REMOTE_ROOT/listam-headless && $REMOTE_HOME/node22/bin/node headless.mjs relay --storage $REMOTE_STORAGE --print-key")"
 echo "$KEY_JSON"
 
 if [ "$DO_INSTALL" = "1" ]; then
     echo "==> installing the systemd user unit (listam-headless-relay)"
     "${SSH[@]}" "$TARGET" \
-        "cd $REMOTE_ROOT/listam-headless && \$HOME/node22/bin/node headless.mjs install --storage $REMOTE_STORAGE --role relay"
+        "cd $REMOTE_ROOT/listam-headless && $REMOTE_HOME/node22/bin/node headless.mjs install --storage $REMOTE_STORAGE --role relay"
     echo "==> unit status"
     "${SSH[@]}" "$TARGET" "systemctl --user status listam-headless-relay --no-pager | head -20" || true
 fi

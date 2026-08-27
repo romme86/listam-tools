@@ -48,6 +48,24 @@ the same JSON-line stdin/stdout protocol as the local ones.
    all announced cores become fully contiguous and grow past the pre-add
    state. Metrics: first-contact latency, mirror lag (~10s resolution — the
    firmware's status interval).
+4. **Invite-contention row** (`--contention [host,joiner,joiner,…]`) — ONE
+   invite, several joiners racing it. Every other row mints a fresh invite per
+   joiner, so invite contention had never been exercised. Exactly one joiner may
+   land on the base; the assertion that matters is on the LOSERS — each must
+   settle inside 20 s with a reason a machine can name, not sit on
+   blind-pairing's 120 s deadline. Defaults to four local headless instances
+   (it is a protocol race, not a network one — real machines only add SSH
+   latency, and the remotes are the owner's live peers). Run it with `--net lan`.
+5. **NAT-simulation rows** (`--nat-sim`) — both peers behind a source-port-
+   randomizing carrier NAT, in containers (`cross-device/nat-sim/`, own README),
+   never against a device. Without a relay, hyperdht must abort *without
+   punching* (`HOLEPUNCH_DOUBLE_RANDOMIZED_NATS` / `HOLEPUNCH_ABORTED`) — that
+   is the 2026-08-26 field failure reproduced. With `relayThrough` pointed at a
+   locally run `listam-headless` relay, the connection must complete. Both rows
+   first assert `dht.randomized === true` on each peer: without that the sim
+   isn't the environment under test and its verdict means nothing. Reports SKIP
+   (not FAIL) where docker is unavailable. Wants `--time-budget 20`+ on a cold
+   run — the first one builds a container image.
 
 The leaf's offline-serve guarantee (fresh peer syncs from the leaf while the
 hub is dead) is covered on-host by `listam-hardware/leaf-peer/bridge-js/e2e.mjs`;
@@ -79,9 +97,14 @@ the cycle.
 
 - `--time-budget <min>` (default 15): hard watchdog — skips new rows when low,
   force-writes the report, sweeps the remotes, exits 2 at the cap.
-- Per-row time-box (5 min pair / 6 min mesh+leaf) and per-request 30s deadline
-  (join: 120s — it answers only after the pairing ack round-trip) so an
-  alive-but-unresponsive instance fails its row in seconds, not hours.
+- Per-row time-box (5 min pair+contention / 6 min mesh+leaf) and per-request 30s
+  deadline (join: 120s — it answers only after the pairing ack round-trip) so an
+  alive-but-unresponsive instance fails its row in seconds, not hours. The
+  nat-sim rows manage their own deadlines inside `nat-sim/run.mjs` and always
+  tear the container stack down.
+- A row may report **SKIP**, meaning it could not run on this machine (no docker
+  daemon, no relay to point at). SKIP does not fail the run: conflating "could
+  not run here" with "regressed" is how a red stops meaning anything.
 - Remote sweep runs even on abort. Never combine a `pkill` pattern and its
   target paths in one ssh command line — it regex-matches its own shell.
 

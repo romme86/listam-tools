@@ -1,0 +1,131 @@
+# Two peers, each alone behind its own carrier-grade NAT, on a private DHT.
+#
+#   lan-a                     public              lan-b
+#   10.91.0.0/24              10.90.0.0/24        10.92.0.0/24
+#   peer-a .10 ── gw-a .2/.11 ─── bootstrap .10 ─── gw-b .12/.2 ── peer-b .10
+#                                 relay     .20
+#
+# A peer reaches the public network ONLY through its own gateway: peer.sh
+# replaces docker's default route with the gateway's address, so every packet
+# out of a peer passes the MASQUERADE --random-fully rule. Nothing here reaches
+# the mainnet DHT — the bootstrap is a private testnet on `public`.
+#
+# The peer LANs are deliberately NOT `internal: true`, which would read as the
+# stronger guarantee: docker implements `internal` by dropping any packet on
+# that bridge whose peer address is outside the subnet, which drops the hop to
+# the gateway's public side as well and leaves the peers with no network at all.
+#
+# Driven by cross-device/nat-sim/run.mjs — it fills the SIM_* variables and
+# starts the services in the order the probes need. See README.md.
+name: listam-natsim
+
+x-sim: &sim
+  image: listam-nat-sim
+  build:
+    context: .
+  init: true
+
+networks:
+  public:
+    ipam:
+      config:
+        - subnet: 10.90.0.0/24
+  lan-a:
+    ipam:
+      config:
+        - subnet: 10.91.0.0/24
+  lan-b:
+    ipam:
+      config:
+        - subnet: 10.92.0.0/24
+
+services:
+  bootstrap:
+    <<: *sim
+    command: ["node", "/sim/bootstrap.mjs"]
+    environment:
+      SIM_PUBLIC_IP: "10.90.0.10"
+      SIM_BOOTSTRAP_NODES: "5"
+    networks:
+      public:
+        ipv4_address: 10.90.0.10
+
+  # Only started for the relay row (`docker compose --profile relay`), because
+  # without listam-headless/src/relay.mjs on disk there is nothing to run.
+  relay:
+    <<: *sim
+    profiles: ["relay"]
+    command: ["node", "/sim/relay-entry.mjs"]
+    environment:
+      SIM_BOOTSTRAP: "${SIM_BOOTSTRAP:-}"
+      SIM_RELAY_SEED: "${SIM_RELAY_SEED:-}"
+    # The relay's own source, plus the pure-JS @listam packages it imports.
+    # Those two have no native deps, so the host's copy loads here unchanged —
+    # everything with a prebuild is installed in the image instead.
+    volumes:
+      - ../../../listam-headless/src:/listam-headless-src:ro
+      - ../../../listam-packages/packages/secrets:/sim/node_modules/@listam/secrets:ro
+      - ../../../listam-packages/packages/logging:/sim/node_modules/@listam/logging:ro
+    networks:
+      public:
+        ipv4_address: 10.90.0.20
+
+  gw-a:
+    <<: *sim
+    entrypoint: ["/sim/gateway.sh"]
+    cap_add: ["NET_ADMIN"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      SIM_PUBLIC_PREFIX: "10.90.0."
+    networks:
+      public:
+        ipv4_address: 10.90.0.11
+      lan-a:
+        ipv4_address: 10.91.0.2
+
+  gw-b:
+    <<: *sim
+    entrypoint: ["/sim/gateway.sh"]
+    cap_add: ["NET_ADMIN"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      SIM_PUBLIC_PREFIX: "10.90.0."
+    networks:
+      public:
+        ipv4_address: 10.90.0.12
+      lan-b:
+        ipv4_address: 10.92.0.2
+
+  peer-a:
+    <<: *sim
+    entrypoint: ["/sim/peer.sh"]
+    cap_add: ["NET_ADMIN"]
+    depends_on: ["gw-a"]
+    environment:
+      SIM_GATEWAY: "10.91.0.2"
+      SIM_ROLE: "server"
+      SIM_BOOTSTRAP: "${SIM_BOOTSTRAP:-}"
+      SIM_SEED: "${SIM_SEED:-}"
+      SIM_RELAY_PUBLIC_KEY: "${SIM_RELAY_PUBLIC_KEY:-}"
+      SIM_CONNECT_TIMEOUT_MS: "${SIM_CONNECT_TIMEOUT_MS:-90000}"
+    networks:
+      lan-a:
+        ipv4_address: 10.91.0.10
+
+  peer-b:
+    <<: *sim
+    entrypoint: ["/sim/peer.sh"]
+    cap_add: ["NET_ADMIN"]
+    depends_on: ["gw-b"]
+    environment:
+      SIM_GATEWAY: "10.92.0.2"
+      SIM_ROLE: "client"
+      SIM_BOOTSTRAP: "${SIM_BOOTSTRAP:-}"
+      SIM_SEED: "${SIM_SEED:-}"
+      SIM_RELAY_PUBLIC_KEY: "${SIM_RELAY_PUBLIC_KEY:-}"
+      SIM_CONNECT_TIMEOUT_MS: "${SIM_CONNECT_TIMEOUT_MS:-90000}"
+    networks:
+      lan-b:
+        ipv4_address: 10.92.0.10

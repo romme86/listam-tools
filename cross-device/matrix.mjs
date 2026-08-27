@@ -9,12 +9,25 @@
 //   node listam-tools/cross-device/matrix.mjs                 # mainnet DHT (production path)
 //   node listam-tools/cross-device/matrix.mjs --net lan       # private DHT bound to this Mac's LAN IP
 //   node listam-tools/cross-device/matrix.mjs --devices mac-headless,mac-desktop,geekom,pi
+//   node listam-tools/cross-device/matrix.mjs --net lan --devices mac-headless --contention
+//   node listam-tools/cross-device/matrix.mjs --devices mac-headless --nat-sim --time-budget 30
 //
 // Caveat (observed 2026-06-11): --net lan colocates every testnet DHT node
 // with one endpoint machine. Same-machine pairings pass, but cross-machine
 // pairings never complete the BlindPairing connect (DHT bootstrap reachable,
 // holepunch unresolved) — use mainnet for cross-machine rows until the
 // bootstrap runs on a machine that hosts no instances.
+//
+// Two failure classes this harness was structurally blind to until the
+// 2026-08-26 4G pairing failure, now covered by their own rows:
+//   --contention  ONE invite, several joiners racing it. Every other row mints
+//                 a fresh invite per joiner, so invite contention — and the
+//                 swallowed host-side refusal underneath it — could never show
+//                 up. Local devices and --net lan: it is a protocol race, not a
+//                 network one.
+//   --nat-sim     both peers behind a source-port-randomizing carrier NAT, the
+//                 condition that makes hyperdht abort without punching. Runs in
+//                 containers (cross-device/nat-sim/), never against a device.
 //
 // Remote targets are headless-only (the desktop surface needs a display).
 // Device specifics (SSH hosts, key paths, the board's serial port) are NOT
@@ -36,6 +49,8 @@ import {
     REPO_ROOT,
 } from './driver.mjs'
 import { openSerialWatcher, readFirmwareCfg } from './esp32-leaf.mjs'
+import { LOSER_SETTLE_MS, isDeadlineReason, isUninformativeReason, readJoinFailure } from './pairing-contention.mjs'
+import { runNatSim, judgeNatSim } from './nat-sim/run.mjs'
 
 process.on('uncaughtException', (error) => {
     if (/connection reset by peer/i.test(error?.message ?? '')) return
@@ -76,6 +91,16 @@ const CONFIG_PATH = process.env.LISTAM_XDEV_CONFIG ?? join(HERE, 'devices.local.
 const fileCfg = existsSync(CONFIG_PATH) ? JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) : {}
 const cfgFor = (name) => fileCfg[name] ?? {}
 
+// --contention takes an optional `host,joiner,joiner,…` list. The default is
+// four LOCAL headless instances: contention is a race between candidates on one
+// invite, so real machines add SSH latency and nothing else — and the remotes
+// in devices.local.json are the owner's live always-on peers.
+const CONTENTION = args.contention === true || typeof args.contention === 'string'
+const CONTENTION_DEVICES = typeof args.contention === 'string'
+    ? args.contention.split(',').map((name) => name.trim()).filter(Boolean)
+    : ['mac-headless', 'mac-headless', 'mac-headless', 'mac-headless']
+const NAT_SIM = args['nat-sim'] === true
+
 const ESP32 = args.esp32 === true || typeof args.esp32 === 'string'
 const ESP32_SERIAL = typeof args.esp32 === 'string'
     ? args.esp32
@@ -115,11 +140,15 @@ const deviceNames = String(args.devices ?? 'mac-headless,mac-desktop,geekom')
     .split(',')
     .map((name) => name.trim())
     .filter(Boolean)
-for (const name of deviceNames) {
+for (const name of [...deviceNames, ...(CONTENTION ? CONTENTION_DEVICES : [])]) {
     if (!DEVICES[name]) {
         console.error(`unknown device '${name}' (known: ${Object.keys(DEVICES).join(', ')})`)
         process.exit(1)
     }
+}
+if (CONTENTION && CONTENTION_DEVICES.length < 3) {
+    console.error('--contention needs a host plus at least two joiners to be a race')
+    process.exit(1)
 }
 
 function lanAddress() {
@@ -375,6 +404,157 @@ async function meshRow(devices) {
     return row
 }
 
+// ONE invite, several joiners racing it. Exactly one may win — but "exactly one
+// wins" is satisfied by a hang, so that is not what this row is for. It is for
+// the LOSERS: each one must be told it lost, quickly, and for a reason a machine
+// can name. The 2026-08-26 investigation found every host-side refusal calling
+// `candidate.close()`, which does not exist on blind-pairing's MemberRequest —
+// the TypeError landed in `catch (_) {}`, the guest was never told anything, and
+// it sat on the 120 s pairing deadline. A silent refusal and a dead network are
+// indistinguishable to the person holding the phone.
+async function inviteContentionRow(devices) {
+    rowCounter++
+    const [hostDevice, ...joinerDevices] = devices
+    const row = {
+        row: `contention: 1 invite, ${joinerDevices.length} joiners (host ${hostDevice})`,
+        host: hostDevice,
+        result: 'PASS',
+        joiners: {},
+    }
+    const tag = `r${rowCounter}`
+    let instances = []
+    try {
+        await raceRow((async () => {
+        const [host, ...joiners] = await Promise.all([hostDevice, ...joinerDevices].map((device, index) =>
+            launch(device, index === 0 ? 'host' : `join${index}`)
+                .then((instance) => { instances.push(instance); return instance })))
+        progress(`${row.row} :: launched`)
+
+        await host.add(`Milk-${tag}`)
+        await host.waitFor((dump) => (dump.items?.length ?? 0) >= 1, { timeoutMs: 30_000 })
+
+        // Minted ONCE and reused by every joiner. Re-minting per joiner is
+        // exactly the blind spot this row exists to close.
+        const invite = await host.invite()
+
+        const outcomes = await Promise.all(joiners.map(async (joiner) => {
+            const startedAt = now()
+            const outcome = { joiner, error: null }
+            try {
+                await joiner.join(invite)
+            } catch (error) {
+                outcome.error = String(error?.message ?? error).split('\n')[0]
+            }
+            outcome.settled_ms = now() - startedAt
+            return outcome
+        }))
+        progress(`${row.row} :: all joins settled (${outcomes.map((o) => o.settled_ms).join(', ')}ms)`)
+
+        // The join op answers before `joined` flips — a guest can be paired and
+        // still waiting for write access — so the winner is whoever's own dump
+        // admits it, not whoever's op returned first.
+        const winnerDeadline = now() + 90_000
+        let winners = []
+        for (;;) {
+            const dumps = await Promise.all(joiners.map((joiner) => joiner.dump()))
+            winners = joiners.filter((_, index) => dumps[index].joined === true)
+            if (winners.length > 0 || now() > winnerDeadline) break
+            await new Promise((resolve) => setTimeout(resolve, 500))
+        }
+        // A second winner arriving late is the failure mode that matters most
+        // (two writers admitted on a single-use invite), so give it a window to
+        // show up rather than reading the first sweep as final.
+        if (winners.length > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 5_000))
+            const dumps = await Promise.all(joiners.map((joiner) => joiner.dump()))
+            winners = joiners.filter((_, index) => dumps[index].joined === true)
+        }
+
+        const problems = []
+        for (const outcome of outcomes) {
+            const won = winners.includes(outcome.joiner)
+            const failure = won ? null : readJoinFailure(outcome.joiner)
+            row.joiners[outcome.joiner.label] = {
+                won,
+                settled_ms: outcome.settled_ms,
+                reason: failure?.reason ?? null,
+                // False means the slug was inferred from English prose rather
+                // than read off the wire — worth seeing in the report even when
+                // the row passes.
+                structured: failure?.structured ?? null,
+                detail: failure?.message ?? outcome.error ?? null,
+            }
+            if (won) {
+                row.winner_settle_ms = outcome.settled_ms
+                continue
+            }
+            if (outcome.settled_ms > LOSER_SETTLE_MS) {
+                problems.push(`${outcome.joiner.label} hung ${outcome.settled_ms}ms (budget ${LOSER_SETTLE_MS}ms) — the host's refusal never reached it`)
+            }
+            if (!failure) {
+                problems.push(`${outcome.joiner.label} produced no join failure on any channel — it was refused silently, or not refused at all`)
+            } else if (isDeadlineReason(failure.reason)) {
+                problems.push(`${outcome.joiner.label} ended on '${failure.reason}' — that is a clock running out, not the host answering`)
+            } else if (isUninformativeReason(failure.reason)) {
+                problems.push(`${outcome.joiner.label} failed with '${failure.reason}' — a loser on a single-use invite has a specific reason waiting for it: ${failure.message}`)
+            }
+        }
+        if (winners.length !== 1) {
+            problems.unshift(`expected exactly 1 joiner on the base, got ${winners.length} (${winners.map((w) => w.label).join(', ') || 'none'})`)
+        }
+        if (problems.length > 0) throw new Error(problems.join('; '))
+        })(), 300_000, row.row)
+    } catch (error) {
+        row.result = 'FAIL'
+        row.error = String(error?.message ?? error).slice(0, 1500)
+    } finally {
+        await stopAll(instances)
+    }
+    report.rows.push(row)
+    writeReport()
+    console.log(`row ${row.row}: ${row.result === 'PASS' ? 'PASS' : `FAIL (${row.error?.split('\n')[0]})`}`)
+    return row
+}
+
+// Both peers behind a source-port-randomizing carrier NAT — the condition that
+// makes hyperdht abort without ever punching. Runs entirely in containers
+// (cross-device/nat-sim/), never against a device, because no machine in the
+// device roster sits behind a CGNAT. Two variants: without a relay the abort is
+// the expected result (the sim is faithful); with `relayThrough` pointed at a
+// locally run relay the connection is the expected result (the fix works).
+async function natSimRow({ relay }) {
+    rowCounter++
+    const row = {
+        row: relay ? 'nat-sim: double randomized NAT + relayThrough' : 'nat-sim: double randomized NAT',
+        result: 'PASS',
+    }
+    try {
+        const outcome = await runNatSim({ relay, progress: (message) => progress(`${row.row} :: ${message}`) })
+        if (outcome.skipped) {
+            row.result = 'SKIP'
+            row.skipped = outcome.reason
+        } else {
+            row.randomized = Object.fromEntries(
+                Object.entries(outcome.peers).map(([name, peer]) => [name, peer.randomized]))
+            row.connect = outcome.connect
+            row.connect_ms = outcome.connect?.ms ?? null
+            if (outcome.relay_public_key) row.relay_public_key = outcome.relay_public_key
+            const problems = judgeNatSim(outcome, { relay })
+            if (problems.length > 0) throw new Error(problems.join('; '))
+        }
+    } catch (error) {
+        row.result = 'FAIL'
+        row.error = String(error?.message ?? error).slice(0, 1500)
+    }
+    report.rows.push(row)
+    writeReport()
+    const status = row.result === 'PASS'
+        ? 'PASS'
+        : row.result === 'SKIP' ? `SKIP (${row.skipped})` : `FAIL (${row.error?.split('\n')[0]})`
+    console.log(`row ${row.row}: ${status}`)
+    return row
+}
+
 // The ESP32 leaf row: the board is a blind dial-only mirror, so instead of a
 // pairing we launch the persistent hub it was provisioned against, append
 // items, and require the board's own serial log to show every announced core
@@ -461,7 +641,8 @@ const watchdog = setTimeout(async () => {
 }, BUDGET_MS)
 watchdog.unref()
 
-console.log(`# devices: ${deviceNames.join(', ')} | net: ${NET} | pairs: ${UNORDERED ? 'unordered' : 'ordered'} | budget: ${Math.round(BUDGET_MS / 60_000)} min`)
+const extraRows = [CONTENTION ? 'contention' : null, NAT_SIM ? 'nat-sim' : null, ESP32 ? 'esp32' : null].filter(Boolean)
+console.log(`# devices: ${deviceNames.join(', ')} | net: ${NET} | pairs: ${UNORDERED ? 'unordered' : 'ordered'} | budget: ${Math.round(BUDGET_MS / 60_000)} min${extraRows.length ? ` | extra rows: ${extraRows.join(', ')}` : ''}`)
 pairs: for (let i = 0; i < deviceNames.length; i++) {
     for (let j = 0; j < deviceNames.length; j++) {
         if (i === j) continue
@@ -480,6 +661,21 @@ if (deviceNames.length >= 3 && remainingMs() > 150_000) {
     progress('time budget low — skipping mesh row')
     report.skipped = (report.skipped ? report.skipped + '; ' : '') + 'mesh skipped on low budget'
 }
+if (CONTENTION && remainingMs() > 150_000) {
+    await inviteContentionRow(CONTENTION_DEVICES)
+} else if (CONTENTION) {
+    progress('time budget low — skipping contention row')
+    report.skipped = (report.skipped ? report.skipped + '; ' : '') + 'contention skipped on low budget'
+}
+// A cold nat-sim run has to build the container image first, so it wants a far
+// larger slice than a pairing row — don't start one we cannot finish.
+if (NAT_SIM && remainingMs() > 300_000) {
+    await natSimRow({ relay: false })
+    await natSimRow({ relay: true })
+} else if (NAT_SIM) {
+    progress('time budget low — skipping nat-sim rows (a cold run builds the container image first)')
+    report.skipped = (report.skipped ? report.skipped + '; ' : '') + 'nat-sim skipped on low budget'
+}
 if (ESP32 && remainingMs() > 120_000) {
     await esp32LeafRow()
 } else if (ESP32) {
@@ -491,12 +687,14 @@ await cleanupRemotes()
 report.finishedAt = new Date().toISOString()
 writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2))
 
-const failed = report.rows.filter((row) => row.result !== 'PASS')
+// SKIP is a row that could not run here (no docker daemon, no relay.mjs yet) —
+// reporting it as a failure would make it indistinguishable from a regression.
+const failed = report.rows.filter((row) => row.result !== 'PASS' && row.result !== 'SKIP')
 console.log('')
 console.table(report.rows.map((row) => ({
     row: row.row,
     result: row.result,
-    join_ms: row.join_ms ?? row.full_convergence_ms ?? row.first_contact_ms ?? null,
+    join_ms: row.join_ms ?? row.full_convergence_ms ?? row.first_contact_ms ?? row.winner_settle_ms ?? row.connect_ms ?? null,
     initial_sync_ms: row.initial_sync_ms ?? null,
     'guest→host_ms': row.guest_to_host_ms ?? null,
     'host→guest_ms': row.host_to_guest_ms ?? row.mirror_lag_ms ?? null,

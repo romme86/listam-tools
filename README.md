@@ -15,6 +15,8 @@ node listam-tools/cross-device/matrix.mjs --devices mac-headless,geekom,pi,mac-d
 - **`driver.mjs`** — uniform launcher: local headless/desktop or SSH-spawned remote instances.
 - **`matrix.mjs`** — the matrix runner (per-request deadlines, row time-boxes, `--time-budget` watchdog, guaranteed remote cleanup).
 - **`esp32-leaf.mjs`** — ESP32 leaf-mirror row (drives a persistent hub, asserts on the board's serial block-stored events).
+- **`pairing-contention.mjs`** — `--contention` row support: ONE invite, several joiners racing it. Asserts every loser is refused **fast and for a named reason**, not left on the 120 s pairing deadline.
+- **`nat-sim/`** — `--nat-sim` rows: both peers behind a source-port-randomizing carrier NAT (the 2026-08-26 4G failure), with and without `relayThrough`. Containers only, never a device — see its own README.
 - **`wedge-repro.mjs`** — regression repro for the disconnected-peer wedge.
 - **`devices.local.json`** — your SSH hosts, key paths, and board serial (gitignored; see `devices.example.json`).
 - **`TESTPLAN.md`** — the full plan, device roster, and known constraints.

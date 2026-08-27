@@ -1,0 +1,13 @@
+{
+  "name": "listam-nat-sim",
+  "private": true,
+  "type": "module",
+  "description": "Deps for the containers only — the host-side runner (run.mjs) needs nothing but docker. Beyond hyperdht for the probes, these are what listam-headless/src/relay.mjs imports: the relay container runs the real thing, and resolves its bare imports against this tree.",
+  "dependencies": {
+    "b4a": "^1.8.1",
+    "blind-relay": "^1.6.1",
+    "hypercore-crypto": "^3.7.0",
+    "hyperdht": "^6.32.0",
+    "z32": "^1.1.0"
+  }
+}

@@ -18,7 +18,7 @@ export const HEADLESS_ENTRY = join(ROOT, 'listam-headless', 'headless.mjs')
 export const DESKTOP_DRIVER = join(ROOT, 'listam-desktop', 'test', 'helpers', 'backend-driver.mjs')
 export const REPO_ROOT = ROOT
 
-function lineService(proc, label) {
+export function lineService(proc, label) {
     const pending = new Map()
     let nextId = 0
     let resolveReady
@@ -71,21 +71,27 @@ function lineService(proc, label) {
             const id = ++nextId
             const response = new Promise((resolve) => pending.set(id, resolve))
             proc.stdin.write(JSON.stringify({ ...fields, id, op }) + '\n')
-            const exitRejection = once(proc, 'exit').then(() => {
+            const exitWatch = new AbortController()
+            const exitRejection = once(proc, 'exit', { signal: exitWatch.signal }).then(() => {
                 throw new Error(`[${label}] exited mid-request '${op}' (code ${exitCode})\nstderr tail: ${stderr.slice(-2000)}`)
             })
             exitRejection.catch(() => {})
             // An instance that is alive but never answers (the wedge this
             // harness exists to catch) must fail the row, not hang it.
+            let timer
             const deadline = new Promise((resolve, reject) => {
-                const timer = setTimeout(() => {
+                timer = setTimeout(() => {
                     pending.delete(id)
                     reject(new Error(`[${label}] request '${op}' timed out after ${timeoutMs}ms (instance alive but unresponsive)\nstderr tail: ${stderr.slice(-2000)}`))
                 }, timeoutMs)
                 timer.unref?.()
                 response.then((value) => { clearTimeout(timer); resolve(value) })
             })
-            return Promise.race([deadline, exitRejection])
+            return Promise.race([deadline, exitRejection]).finally(() => {
+                clearTimeout(timer)
+                exitWatch.abort()
+                pending.delete(id)
+            })
         },
         async waitFor(predicate, { timeoutMs = 180_000, intervalMs = 250 } = {}) {
             const deadline = Date.now() + timeoutMs

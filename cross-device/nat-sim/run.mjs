@@ -9,7 +9,6 @@
 // daemon or a missing relay.mjs comes back as `{ skipped, reason }` so the row
 // reports SKIP instead of a red that means nothing. See README.md.
 import { spawn } from 'node:child_process'
-import { once } from 'node:events'
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -42,7 +41,7 @@ function run(command, args, { timeoutMs = COMPOSE_TIMEOUT_MS, env = {} } = {}) {
             clearTimeout(killer)
             resolve({ code: -1, stdout, stderr: `${stderr}${error?.message ?? error}` })
         })
-        once(proc, 'exit').then(([code]) => {
+        proc.once('close', (code) => {
             clearTimeout(killer)
             resolve({ code, stdout, stderr })
         })

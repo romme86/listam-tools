@@ -30,8 +30,8 @@ const REPOS = [
     { name: 'listam-mobile', gate: ['npm', 'run', 'ci'] },
     { name: 'listam-headless', gate: ['npm', 'run', 'ci'] },
     { name: 'listam-hardware', gate: ['cargo', 'test', '--workspace', '--no-fail-fast'], cwd: 'leaf-peer' },
-    { name: 'listam-website', gate: null },
-    { name: 'listam-tools', gate: null },
+    { name: 'listam-website', gate: ['node', 'scripts/wiki-facts.mjs', '--check'] },
+    { name: 'listam-tools', gate: ['node', '--test', 'cross-device/driver.test.mjs', 'cross-device/nat-sim.test.mjs'] },
 ]
 
 const args = new Set(process.argv.slice(2))
@@ -116,7 +116,8 @@ function summarize(output) {
         const total = node.reduce((n, m) => n + Number(m[1]), 0)
         const pass = node.reduce((n, m) => n + Number(m[2]), 0)
         const fail = node.reduce((n, m) => n + Number(m[3]), 0)
-        return `${pass}/${total} pass, ${fail} fail`
+        const todo = [...output.matchAll(/ℹ todo (\d+)/g)].reduce((n, m) => n + Number(m[1]), 0)
+        return `${pass}/${total} pass, ${fail} fail${todo ? `, ${todo} known TODO` : ''}`
     }
     const cargo = [...output.matchAll(/test result: \w+\. (\d+) passed; (\d+) failed/g)]
     if (cargo.length) {
@@ -170,3 +171,6 @@ if (asJson) {
     const totalDirty = rows.reduce((n, r) => n + (r.dirty ?? 0), 0)
     console.log(`Total uncommitted paths across the workspace: ${totalDirty}`)
 }
+
+// A status report used as a gate must propagate failure to its caller.
+if (rows.some((r) => r.missing || r.links?.broken.length || r.gate?.ok === false)) process.exitCode = 1

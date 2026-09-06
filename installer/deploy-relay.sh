@@ -29,6 +29,7 @@ set -euo pipefail
 
 TARGET="${1:-}"
 [ -n "$TARGET" ] || { echo "usage: $0 <ssh-target> [--key <identity>] [--storage <dir>] [--install]" >&2; exit 2; }
+[[ "$TARGET" != -* ]] || { echo "ssh target cannot start with '-'" >&2; exit 2; }
 shift
 
 SSH_KEY=""
@@ -57,11 +58,10 @@ REMOTE_HOME="$("${SSH[@]}" "$TARGET" 'printf %s "$HOME"')"
 : "${REMOTE_STORAGE:=$REMOTE_HOME/listam-relay}"
 : "${REMOTE_ROOT:=$REMOTE_HOME/listam}"
 
-# Same reason: a path with spaces, quotes, $ or backticks produces a broken unit.
-for p in "$REMOTE_STORAGE" "$REMOTE_ROOT"; do
-    case "$p" in
-        *[\ \'\"\$\`]*) echo "refusing: remote paths must be shell-safe (no spaces, quotes, \$ or backticks): $p" >&2; exit 2 ;;
-    esac
+# These paths are interpolated into remote shell commands and a systemd unit.
+# Accept a small absolute-path alphabet, including the resolved remote home.
+for p in "$REMOTE_STORAGE" "$REMOTE_ROOT" "$REMOTE_HOME"; do
+    [[ "$p" =~ ^/[a-zA-Z0-9_./-]+$ ]] || { echo "refusing: remote paths must be absolute and contain only letters, digits, _, ., / or -" >&2; exit 2; }
 done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -73,10 +73,15 @@ echo "==> syncing listam-headless and listam-packages to $TARGET"
 # there (a relay box may also be running a participant peer).
 "${SSH[@]}" "$TARGET" "mkdir -p $REMOTE_ROOT/listam-headless $REMOTE_ROOT/listam-packages"
 tar czf - -C "$HERE/listam-headless" \
-    --exclude node_modules --exclude .git --exclude dist --exclude tmp . \
+    package.json package-lock.json headless.mjs src scripts README.md LICENSE \
     | "${SSH[@]}" "$TARGET" "tar xzf - -C $REMOTE_ROOT/listam-headless"
-tar czf - -C "$HERE/listam-packages" --exclude node_modules --exclude .git . \
+tar czf - -C "$HERE/listam-packages" --exclude node_modules \
+    package.json package-lock.json packages \
     | "${SSH[@]}" "$TARGET" "tar xzf - -C $REMOTE_ROOT/listam-packages"
+
+echo "==> installing the locked relay dependencies"
+"${SSH[@]}" "$TARGET" \
+    "export PATH=$REMOTE_HOME/node22/bin:\$PATH; cd $REMOTE_ROOT/listam-packages && npm ci --omit=dev --no-audit --no-fund && cd $REMOTE_ROOT/listam-headless && npm ci --omit=dev --no-audit --no-fund"
 
 echo "==> minting / reading the relay public key"
 # --print-key is idempotent: it derives from a persisted seed, so re-running it

@@ -16,7 +16,7 @@
 # the two services overwriting each other's snapshot.
 #
 # Usage:
-#   ./deploy-relay.sh <ssh-target> [--key <identity>] [--storage <remote-dir>] [--install]
+#   ./deploy-relay.sh <ssh-target> [--key <identity>] [--storage <remote-dir>] [--root <remote-dir>] [--port <udp-port>] [--install]
 #
 # Example (the Geekom, from cross-device/devices.local.json):
 #   ./deploy-relay.sh cassandrina@cassandrina-app.taile12a8d.ts.net \
@@ -36,16 +36,23 @@ SSH_KEY=""
 REMOTE_STORAGE=""
 DO_INSTALL=0
 REMOTE_ROOT=""
+RELAY_PORT=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --key) SSH_KEY="$2"; shift 2 ;;
         --storage) REMOTE_STORAGE="$2"; shift 2 ;;
         --root) REMOTE_ROOT="$2"; shift 2 ;;
+        --port) RELAY_PORT="$2"; shift 2 ;;
         --install) DO_INSTALL=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+if [ -n "$RELAY_PORT" ]; then
+    [[ "$RELAY_PORT" =~ ^[0-9]{1,5}$ ]] && (( 10#$RELAY_PORT >= 1 && 10#$RELAY_PORT <= 65535 )) \
+        || { echo "relay port must be an integer between 1 and 65535" >&2; exit 2; }
+fi
 
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15)
 [ -n "$SSH_KEY" ] && SSH+=(-i "$SSH_KEY")
@@ -56,7 +63,7 @@ SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15)
 REMOTE_HOME="$("${SSH[@]}" "$TARGET" 'printf %s "$HOME"')"
 [ -n "$REMOTE_HOME" ] || { echo "could not resolve the remote home directory" >&2; exit 1; }
 : "${REMOTE_STORAGE:=$REMOTE_HOME/listam-relay}"
-: "${REMOTE_ROOT:=$REMOTE_HOME/listam}"
+: "${REMOTE_ROOT:=$REMOTE_HOME/listam-relay-app}"
 
 # These paths are interpolated into remote shell commands and a systemd unit.
 # Accept a small absolute-path alphabet, including the resolved remote home.
@@ -94,9 +101,41 @@ echo "$KEY_JSON"
 if [ "$DO_INSTALL" = "1" ]; then
     echo "==> installing the systemd user unit (listam-headless-relay)"
     "${SSH[@]}" "$TARGET" \
-        "cd $REMOTE_ROOT/listam-headless && $REMOTE_HOME/node22/bin/node headless.mjs install --storage $REMOTE_STORAGE --role relay"
+        "cd $REMOTE_ROOT/listam-headless && $REMOTE_HOME/node22/bin/node headless.mjs install --storage $REMOTE_STORAGE --role relay ${RELAY_PORT:+--port $RELAY_PORT}"
     echo "==> unit status"
     "${SSH[@]}" "$TARGET" "systemctl --user status listam-headless-relay --no-pager | head -20" || true
+
+    # A separate timer checks both configured relays with synthetic encrypted
+    # traffic. Failed checks leave a failed unit and a timestamped JSON report;
+    # restarting a healthy relay would not repair a remote network outage.
+    "${SSH[@]}" "$TARGET" "bash -s -- $REMOTE_ROOT $REMOTE_STORAGE $REMOTE_HOME/node22/bin/node" <<'MONITOR'
+set -euo pipefail
+DEPLOY_ROOT="$1"
+RELAY_STORAGE="$2"
+NODE_BIN="$3"
+mkdir -p "$HOME/.config/systemd/user"
+cat > "$HOME/.config/systemd/user/listam-relay-check.service" <<UNIT
+[Unit]
+Description=Verify Listam relay encrypted round trips
+[Service]
+Type=oneshot
+ExecStart=$NODE_BIN $DEPLOY_ROOT/listam-headless/headless.mjs relay-check --storage $RELAY_STORAGE
+TimeoutStartSec=150
+UNIT
+cat > "$HOME/.config/systemd/user/listam-relay-check.timer" <<'UNIT'
+[Unit]
+Description=Check Listam relay reachability every ten minutes
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl --user daemon-reload
+systemctl --user enable --now listam-relay-check.timer
+MONITOR
 fi
 
 cat <<'NEXT'
@@ -104,17 +143,19 @@ cat <<'NEXT'
 ------------------------------------------------------------------
 NEXT STEP — put the key into the clients.
 
-Copy the `publicKey` printed above into DEFAULT_RELAY_KEYS in:
+After verifying an encrypted round trip through the relay from another network,
+add the `publicKey` printed above to DEFAULT_RELAY_KEYS in:
 
     listam-packages/packages/backend/lib/relay.mjs
 
-    export const DEFAULT_RELAY_KEYS = ['<publicKey>']
+    export const DEFAULT_RELAY_KEYS = ['<existing-key>', '<additional-key>']
 
-Then rebuild/ship the apps. Until that lands, clients have no relay
-configured and mobile-data pairing keeps failing exactly as before.
+Keep existing working keys. Rebuild/ship the apps for clients to use the new
+relay; installing this service alone does not update their embedded addresses.
 
-Verify from a client afterwards: the join heartbeat logs
-`relayConfigured: 1`, and `randomized: true` on a phone means the
-relay is the only reason the connection exists at all.
+Verify actual use with the relay's matched-pair/session counters.
+`relayConfigured` only counts configured candidates; it does not prove use.
+Discovery still uses the DHT: a bootstrap address needs a stable public address
+and reachable UDP port, separately from the connection relay's public key.
 ------------------------------------------------------------------
 NEXT

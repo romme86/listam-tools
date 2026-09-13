@@ -25,3 +25,13 @@ node listam-tools/cross-device/matrix.mjs --devices mac-headless,geekom,pi,mac-d
 ## `listam-npm`
 
 Helper for npm publish-token management via the macOS Keychain.
+
+## Release checks
+
+Run `node listam-tools/check-p2p-versions.mjs` from the workspace root to
+verify dependency floors, nested resolutions and installed/locked versions
+across the four active JavaScript runtime graphs.
+
+See [the 13 September release record](reviews/2026-09-13-p2p-release.md) and
+[the persistent service runbook](cross-device/persistent/README.md) for
+relay deployment, encrypted health probes and Pear application mirroring.
